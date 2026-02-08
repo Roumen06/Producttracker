@@ -1,0 +1,486 @@
+{
+  "name": "A - Automatické sledování e-shopů (denně)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 8 * * *"
+            }
+          ]
+        }
+      },
+      "id": "cron-trigger",
+      "name": "Denní trigger 8:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://www.temu.com/search_result.html?search_key={{$json.searchQuery}}",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "fullResponse": true
+            }
+          }
+        },
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            },
+            {
+              "name": "Accept-Language",
+              "value": "cs-CZ,cs;q=0.9"
+            }
+          ]
+        }
+      },
+      "id": "http-temu",
+      "name": "Scrape Temu",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [650, 200],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "url": "https://www.heureka.cz/?h[fraze]={{$json.searchQuery}}",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "fullResponse": true
+            }
+          }
+        },
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            }
+          ]
+        }
+      },
+      "id": "http-heureka",
+      "name": "Scrape Heureka",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [650, 400],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, nazev, kategorie, cena_min, cena_max, parametry FROM produkty WHERE status = 'hledám' ORDER BY priorita DESC LIMIT 20",
+        "options": {}
+      },
+      "id": "postgres-load-criteria",
+      "name": "Načti hledané produkty",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [450, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-credentials",
+          "name": "PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse HTML a extrahuj produkty z Temu\nconst html = $input.first().json.body || '';\nconst products = [];\n\n// Regex pro extrakci produktů (Temu používá JSON-LD nebo specifické data atributy)\nconst productPattern = /<div[^>]*class=\"[^\"]*product[^\"]*\"[^>]*>([\\s\\S]*?)<\\/div>/gi;\nconst pricePattern = /(\\d+[.,]?\\d*)\\s*(Kč|CZK)/i;\nconst titlePattern = /<(?:h[1-6]|span|a)[^>]*class=\"[^\"]*(?:title|name)[^\"]*\"[^>]*>([^<]+)/i;\n\n// Alternativní přístup - hledání JSON dat v HTML\ntry {\n  const jsonLdMatch = html.match(/<script type=\"application\\/ld\\+json\">([\\s\\S]*?)<\\/script>/gi);\n  if (jsonLdMatch) {\n    jsonLdMatch.forEach(match => {\n      try {\n        const jsonContent = match.replace(/<script[^>]*>/, '').replace(/<\\/script>/, '');\n        const data = JSON.parse(jsonContent);\n        if (data['@type'] === 'Product' || (Array.isArray(data) && data[0]?.['@type'] === 'Product')) {\n          const items = Array.isArray(data) ? data : [data];\n          items.forEach(item => {\n            if (item['@type'] === 'Product') {\n              products.push({\n                nazev: item.name || 'Neznámý produkt',\n                cena: parseFloat(item.offers?.price || item.offers?.[0]?.price || 0),\n                url: item.url || item.offers?.url || '',\n                zdroj: 'temu',\n                obrazek: item.image || '',\n                popis: item.description || ''\n              });\n            }\n          });\n        }\n      } catch (e) {\n        // Skip invalid JSON\n      }\n    });\n  }\n} catch (e) {\n  console.error('Error parsing Temu HTML:', e.message);\n}\n\n// Fallback - extrakce z HTML struktury\nif (products.length === 0) {\n  const divPattern = /<div[^>]*data-product[^>]*>([\\s\\S]*?)<\\/div>/gi;\n  let match;\n  while ((match = divPattern.exec(html)) !== null && products.length < 20) {\n    const block = match[1];\n    const titleMatch = block.match(/title=\"([^\"]+)\"/i) || block.match(/>([^<]{10,100})</i);\n    const priceMatch = block.match(/(\\d+[.,]?\\d*)\\s*(Kč|CZK|,-)/i);\n    const urlMatch = block.match(/href=\"([^\"]+)\"/i);\n    const imgMatch = block.match(/src=\"(https?:\\/\\/[^\"]+)\"/i);\n    \n    if (titleMatch && priceMatch) {\n      products.push({\n        nazev: titleMatch[1].trim(),\n        cena: parseFloat(priceMatch[1].replace(',', '.')),\n        url: urlMatch ? urlMatch[1] : '',\n        zdroj: 'temu',\n        obrazek: imgMatch ? imgMatch[1] : '',\n        popis: ''\n      });\n    }\n  }\n}\n\nreturn products.slice(0, 20).map(p => ({ json: p }));"
+      },
+      "id": "parse-temu",
+      "name": "Parse Temu produkty",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [850, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse HTML a extrahuj produkty z Heureka\nconst html = $input.first().json.body || '';\nconst products = [];\n\ntry {\n  // Heureka používá strukturované produktové karty\n  const productCardPattern = /<article[^>]*class=\"[^\"]*c-product[^\"]*\"[^>]*>([\\s\\S]*?)<\\/article>/gi;\n  let match;\n  \n  while ((match = productCardPattern.exec(html)) !== null && products.length < 20) {\n    const card = match[1];\n    \n    // Extrakce názvu\n    const titleMatch = card.match(/<a[^>]*class=\"[^\"]*product-name[^\"]*\"[^>]*>([^<]+)/i) ||\n                       card.match(/<h[23][^>]*>\\s*<a[^>]*>([^<]+)/i) ||\n                       card.match(/title=\"([^\"]+)\"/i);\n    \n    // Extrakce ceny\n    const priceMatch = card.match(/(\\d[\\d\\s]*[.,]?\\d*)\\s*(Kč|,-)/i);\n    \n    // Extrakce URL\n    const urlMatch = card.match(/href=\"(https?:\\/\\/[^\"]+)\"/i) ||\n                     card.match(/href=\"(\\/[^\"]+)\"/i);\n    \n    // Extrakce obrázku\n    const imgMatch = card.match(/src=\"(https?:\\/\\/[^\"]+\\.(?:jpg|jpeg|png|webp)[^\"]*)\"/i) ||\n                     card.match(/data-src=\"(https?:\\/\\/[^\"]+)\"/i);\n    \n    if (titleMatch && priceMatch) {\n      const priceStr = priceMatch[1].replace(/\\s/g, '').replace(',', '.');\n      products.push({\n        nazev: titleMatch[1].trim(),\n        cena: parseFloat(priceStr),\n        url: urlMatch ? (urlMatch[1].startsWith('http') ? urlMatch[1] : 'https://www.heureka.cz' + urlMatch[1]) : '',\n        zdroj: 'heureka',\n        obrazek: imgMatch ? imgMatch[1] : '',\n        popis: ''\n      });\n    }\n  }\n  \n  // Alternativní parsování pomocí JSON-LD\n  if (products.length === 0) {\n    const jsonLdMatch = html.match(/<script type=\"application\\/ld\\+json\">([\\s\\S]*?)<\\/script>/gi);\n    if (jsonLdMatch) {\n      jsonLdMatch.forEach(scriptMatch => {\n        try {\n          const jsonContent = scriptMatch.replace(/<script[^>]*>/, '').replace(/<\\/script>/, '');\n          const data = JSON.parse(jsonContent);\n          \n          if (data['@type'] === 'ItemList' && data.itemListElement) {\n            data.itemListElement.forEach(item => {\n              if (item.item && products.length < 20) {\n                products.push({\n                  nazev: item.item.name || 'Neznámý produkt',\n                  cena: parseFloat(item.item.offers?.lowPrice || item.item.offers?.price || 0),\n                  url: item.item.url || '',\n                  zdroj: 'heureka',\n                  obrazek: item.item.image || '',\n                  popis: item.item.description || ''\n                });\n              }\n            });\n          }\n        } catch (e) {\n          // Skip invalid JSON\n        }\n      });\n    }\n  }\n} catch (e) {\n  console.error('Error parsing Heureka HTML:', e.message);\n}\n\nreturn products.map(p => ({ json: p }));"
+      },
+      "id": "parse-heureka",
+      "name": "Parse Heureka produkty",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [850, 400]
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "mergeByFields": {
+          "values": []
+        },
+        "options": {}
+      },
+      "id": "merge-products",
+      "name": "Sloučit produkty",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2.1,
+      "position": [1050, 300]
+    },
+    {
+      "parameters": {
+        "batchSize": 5,
+        "options": {
+          "reset": false
+        }
+      },
+      "id": "batch-for-claude",
+      "name": "Batch pro Claude API",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [1250, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-key",
+              "value": "={{$env.CLAUDE_API_KEY}}"
+            },
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"claude-sonnet-4-20250514\",\n  \"max_tokens\": 1024,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Analyzuj tento produkt z e-shopu:\\n\\nNázev: {{$json.nazev}}\\nCena: {{$json.cena}} Kč\\nZdroj: {{$json.zdroj}}\\nPopis: {{$json.popis}}\\n\\nMoje kritéria pro hledání (z databáze):\\n{{$node['Načti hledané produkty'].json}}\\n\\nÚkol:\\n1. Porovnej produkt s mými kritérii\\n2. Zhodnoť relevanci a kvalitu nabídky\\n3. Vrať POUZE validní JSON (žádný další text):\\n{\\n  \\\"relevant\\\": true/false,\\n  \\\"score\\\": 1-10,\\n  \\\"reason\\\": \\\"stručné zdůvodnění\\\",\\n  \\\"category\\\": \\\"kategorie produktu\\\",\\n  \\\"matched_criteria_id\\\": číslo nebo null\\n}\"\n    }\n  ]\n}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "claude-analyze",
+      "name": "Claude analýza produktu",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1450, 300],
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "maxTries": 3
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse Claude response a extrahuj JSON\nconst items = $input.all();\nconst results = [];\n\nfor (const item of items) {\n  try {\n    const response = item.json;\n    const content = response.content?.[0]?.text || '';\n    \n    // Najdi JSON v odpovědi\n    const jsonMatch = content.match(/\\{[\\s\\S]*\\}/);\n    if (jsonMatch) {\n      const analysis = JSON.parse(jsonMatch[0]);\n      \n      results.push({\n        json: {\n          ...item.json.originalProduct,\n          claude_relevant: analysis.relevant,\n          claude_score: analysis.score,\n          claude_reason: analysis.reason,\n          claude_category: analysis.category,\n          matched_criteria_id: analysis.matched_criteria_id\n        }\n      });\n    }\n  } catch (e) {\n    console.error('Error parsing Claude response:', e.message);\n  }\n}\n\nreturn results;"
+      },
+      "id": "parse-claude-response",
+      "name": "Parse Claude odpověď",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1650, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json.claude_relevant}}",
+              "value2": true
+            }
+          ],
+          "number": [
+            {
+              "value1": "={{$json.claude_score}}",
+              "operation": "gte",
+              "value2": 7
+            }
+          ]
+        }
+      },
+      "id": "filter-relevant",
+      "name": "Filtruj relevantní (score >= 7)",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 1,
+      "position": [1850, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO produkty (nazev, kategorie, cena_aktualni, zdroj, url, parametry, claude_score, claude_reason, status)\nVALUES (\n  '{{$json.nazev}}',\n  '{{$json.claude_category}}',\n  {{$json.cena}},\n  '{{$json.zdroj}}',\n  '{{$json.url}}',\n  '{\"obrazek\": \"{{$json.obrazek}}\", \"popis\": \"{{$json.popis}}\"}',\n  {{$json.claude_score}},\n  '{{$json.claude_reason}}',\n  'hledám'\n)\nON CONFLICT (url) DO UPDATE SET\n  cena_aktualni = EXCLUDED.cena_aktualni,\n  claude_score = EXCLUDED.claude_score,\n  claude_reason = EXCLUDED.claude_reason,\n  datum_aktualizace = NOW()\nRETURNING id",
+        "options": {}
+      },
+      "id": "postgres-save",
+      "name": "Ulož do PostgreSQL",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [2050, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-credentials",
+          "name": "PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{$json.claude_score}}",
+              "operation": "gte",
+              "value2": 9
+            }
+          ]
+        }
+      },
+      "id": "filter-high-score",
+      "name": "Score >= 9?",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 1,
+      "position": [2250, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{$env.DISCORD_WEBHOOK_URL}}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"embeds\": [{\n    \"title\": \"🔥 Skvělá nabídka nalezena!\",\n    \"description\": \"{{$json.nazev}}\",\n    \"color\": 65280,\n    \"fields\": [\n      {\n        \"name\": \"💰 Cena\",\n        \"value\": \"{{$json.cena}} Kč\",\n        \"inline\": true\n      },\n      {\n        \"name\": \"⭐ Score\",\n        \"value\": \"{{$json.claude_score}}/10\",\n        \"inline\": true\n      },\n      {\n        \"name\": \"📂 Kategorie\",\n        \"value\": \"{{$json.claude_category}}\",\n        \"inline\": true\n      },\n      {\n        \"name\": \"📝 Důvod\",\n        \"value\": \"{{$json.claude_reason}}\",\n        \"inline\": false\n      }\n    ],\n    \"thumbnail\": {\n      \"url\": \"{{$json.obrazek}}\"\n    },\n    \"url\": \"{{$json.url}}\",\n    \"footer\": {\n      \"text\": \"Zdroj: {{$json.zdroj}} | Nalezeno: {{$now.format('DD.MM.YYYY HH:mm')}}\"\n    }\n  }]\n}",
+        "options": {}
+      },
+      "id": "discord-notify",
+      "name": "Discord notifikace",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [2450, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Příprava search queries z DB kritérií\nconst criteria = $input.all();\nconst queries = [];\n\nfor (const item of criteria) {\n  const product = item.json;\n  queries.push({\n    json: {\n      searchQuery: encodeURIComponent(product.nazev),\n      productId: product.id,\n      kategorie: product.kategorie,\n      cena_min: product.cena_min,\n      cena_max: product.cena_max\n    }\n  });\n}\n\nreturn queries.length > 0 ? queries : [{ json: { searchQuery: 'populární produkty' } }];"
+      },
+      "id": "prepare-queries",
+      "name": "Připrav search queries",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [450, 150]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Rate limiting - čekej mezi requesty\nconst waitTime = 2000; // 2 sekundy mezi requesty\nawait new Promise(resolve => setTimeout(resolve, waitTime));\nreturn $input.all();"
+      },
+      "id": "rate-limit",
+      "name": "Rate Limit",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1250, 150]
+    },
+    {
+      "parameters": {
+        "errorMessage": "Chyba při zpracování workflow A - E-shop tracking"
+      },
+      "id": "error-handler",
+      "name": "Error Handler",
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [1850, 500]
+    }
+  ],
+  "connections": {
+    "Denní trigger 8:00": {
+      "main": [
+        [
+          {
+            "node": "Načti hledané produkty",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Načti hledané produkty": {
+      "main": [
+        [
+          {
+            "node": "Připrav search queries",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Připrav search queries": {
+      "main": [
+        [
+          {
+            "node": "Scrape Temu",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Scrape Heureka",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Scrape Temu": {
+      "main": [
+        [
+          {
+            "node": "Parse Temu produkty",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Scrape Heureka": {
+      "main": [
+        [
+          {
+            "node": "Parse Heureka produkty",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Temu produkty": {
+      "main": [
+        [
+          {
+            "node": "Sloučit produkty",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Heureka produkty": {
+      "main": [
+        [
+          {
+            "node": "Sloučit produkty",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Sloučit produkty": {
+      "main": [
+        [
+          {
+            "node": "Rate Limit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rate Limit": {
+      "main": [
+        [
+          {
+            "node": "Batch pro Claude API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Batch pro Claude API": {
+      "main": [
+        [
+          {
+            "node": "Claude analýza produktu",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claude analýza produktu": {
+      "main": [
+        [
+          {
+            "node": "Parse Claude odpověď",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Claude odpověď": {
+      "main": [
+        [
+          {
+            "node": "Filtruj relevantní (score >= 7)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filtruj relevantní (score >= 7)": {
+      "main": [
+        [
+          {
+            "node": "Ulož do PostgreSQL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ulož do PostgreSQL": {
+      "main": [
+        [
+          {
+            "node": "Score >= 9?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Score >= 9?": {
+      "main": [
+        [
+          {
+            "node": "Discord notifikace",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "staticData": null,
+  "tags": [
+    {
+      "name": "product-tracker",
+      "createdAt": "2024-01-01T00:00:00.000Z",
+      "updatedAt": "2024-01-01T00:00:00.000Z"
+    }
+  ],
+  "triggerCount": 1,
+  "updatedAt": "2024-01-01T00:00:00.000Z",
+  "versionId": "1"
+}

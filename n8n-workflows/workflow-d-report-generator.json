@@ -1,0 +1,345 @@
+{
+  "name": "D - Generování reportu",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "generate-report",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook /generate-report",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 300],
+      "webhookId": "generate-report"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT \n  p.id,\n  p.nazev,\n  p.kategorie,\n  p.cena_aktualni,\n  p.cena_min,\n  p.cena_max,\n  p.priorita,\n  p.status,\n  p.zdroj,\n  p.url,\n  p.claude_score,\n  p.claude_reason,\n  p.datum_pridani,\n  p.datum_aktualizace,\n  COUNT(bn.id) as pocet_nalezu\nFROM produkty p\nLEFT JOIN bazarove_nalezy bn ON bn.matched_produkt_id = p.id\nWHERE p.user_id = $1 OR $1 IS NULL\nGROUP BY p.id\nORDER BY \n  CASE p.priorita WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END,\n  p.datum_aktualizace DESC",
+        "options": {
+          "queryParams": "={{[$json.body?.user_id || null]}}"
+        }
+      },
+      "id": "load-products",
+      "name": "Načti všechny produkty",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [450, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-credentials",
+          "name": "PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT \n  bn.*,\n  p.nazev as matched_nazev\nFROM bazarove_nalezy bn\nLEFT JOIN produkty p ON bn.matched_produkt_id = p.id\nWHERE bn.status IN ('new', 'interested')\nORDER BY bn.claude_confidence DESC, bn.datum_nalezeni DESC\nLIMIT 20",
+        "options": {}
+      },
+      "id": "load-bazaar-finds",
+      "name": "Načti bazarové nálezy",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [450, 450],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-credentials",
+          "name": "PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT \n  COUNT(*) FILTER (WHERE status = 'hledám') as aktivni_hledani,\n  COUNT(*) FILTER (WHERE status = 'našel') as nalezeno,\n  COUNT(*) FILTER (WHERE status = 'koupil') as koupeno,\n  COALESCE(SUM(cena_max - cena_aktualni) FILTER (WHERE cena_aktualni < cena_max AND status = 'koupil'), 0) as usetreno,\n  COUNT(DISTINCT kategorie) as pocet_kategorii\nFROM produkty",
+        "options": {}
+      },
+      "id": "load-stats",
+      "name": "Načti statistiky",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [450, 600],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-credentials",
+          "name": "PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Připrav data pro Claude\nconst products = $('Načti všechny produkty').all().map(i => i.json);\nconst bazaarFinds = $('Načti bazarové nálezy').all().map(i => i.json);\nconst stats = $('Načti statistiky').first().json;\nconst requestData = $('Webhook /generate-report').first().json;\n\nreturn [{\n  json: {\n    products,\n    bazaarFinds,\n    stats,\n    userId: requestData.body?.user_id,\n    source: requestData.body?.source || 'web',\n    generatedAt: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "prepare-data",
+      "name": "Připrav data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [700, 400]
+    },
+    {
+      "parameters": {
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-key",
+              "value": "={{$env.CLAUDE_API_KEY}}"
+            },
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"claude-sonnet-4-20250514\",\n  \"max_tokens\": 4096,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Vytvoř přehledný HTML report o sledovaných produktech a bazarových nálezech.\\n\\nSTATISTIKY:\\n{{JSON.stringify($json.stats)}}\\n\\nPRODUKTY ({{$json.products.length}}):\\n{{JSON.stringify($json.products.slice(0, 30))}}\\n\\nBAZAROVÉ NÁLEZY ({{$json.bazaarFinds.length}}):\\n{{JSON.stringify($json.bazaarFinds.slice(0, 15))}}\\n\\nVygeneruj kompletní HTML report s těmito sekcemi:\\n1. Shrnutí a statistiky (karty s čísly)\\n2. Produkty rozdělené podle priority (high/medium/low)\\n3. Top bazarové nálezy\\n4. Doporučení co koupit\\n\\nPoužij moderní CSS styling (inline styles), responzivní design, hezké barvy.\\nVrať POUZE HTML kód, žádný markdown ani další text.\"\n    }\n  ]\n}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "claude-generate-report",
+      "name": "Claude: Generuj HTML report",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [900, 400],
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "maxTries": 2
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extrahuj HTML z Claude odpovědi\nconst response = $input.first().json;\nconst preparedData = $('Připrav data').first().json;\nconst content = response.content?.[0]?.text || '';\n\n// Najdi HTML\nlet html = content;\n\n// Pokud je obalené v markdown code blocku, extrahuj\nconst htmlMatch = content.match(/```html\\n?([\\s\\S]*?)```/) || \n                  content.match(/```\\n?([\\s\\S]*?)```/) ||\n                  content.match(/<(!DOCTYPE|html)[\\s\\S]*<\\/html>/i);\n\nif (htmlMatch) {\n  html = htmlMatch[1] || htmlMatch[0];\n}\n\n// Fallback - pokud Claude nevrátil HTML\nif (!html.includes('<') || html.length < 100) {\n  html = `\n<!DOCTYPE html>\n<html lang=\"cs\">\n<head>\n  <meta charset=\"UTF-8\">\n  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n  <title>Product Tracker Report</title>\n  <style>\n    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #1a1a2e; color: #eee; padding: 20px; }\n    .container { max-width: 1200px; margin: 0 auto; }\n    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-bottom: 30px; }\n    .stat-card { background: #16213e; padding: 20px; border-radius: 12px; text-align: center; }\n    .stat-value { font-size: 2.5rem; font-weight: bold; color: #00ff88; }\n    .stat-label { color: #888; margin-top: 5px; }\n    h1 { color: #00ff88; }\n    h2 { color: #fff; border-bottom: 2px solid #00ff88; padding-bottom: 10px; }\n    .product { background: #16213e; padding: 15px; margin: 10px 0; border-radius: 8px; border-left: 4px solid #00ff88; }\n    .product.high { border-left-color: #ff4757; }\n    .product.medium { border-left-color: #ffa502; }\n    .product.low { border-left-color: #2ed573; }\n    .price { color: #00ff88; font-weight: bold; }\n  </style>\n</head>\n<body>\n  <div class=\"container\">\n    <h1>📊 Product Tracker Report</h1>\n    <p>Generováno: ${new Date().toLocaleString('cs-CZ')}</p>\n    \n    <div class=\"stats\">\n      <div class=\"stat-card\">\n        <div class=\"stat-value\">${preparedData.stats.aktivni_hledani || 0}</div>\n        <div class=\"stat-label\">Aktivně hledám</div>\n      </div>\n      <div class=\"stat-card\">\n        <div class=\"stat-value\">${preparedData.stats.nalezeno || 0}</div>\n        <div class=\"stat-label\">Nalezeno</div>\n      </div>\n      <div class=\"stat-card\">\n        <div class=\"stat-value\">${preparedData.stats.koupeno || 0}</div>\n        <div class=\"stat-label\">Koupeno</div>\n      </div>\n      <div class=\"stat-card\">\n        <div class=\"stat-value\">${preparedData.stats.usetreno || 0} Kč</div>\n        <div class=\"stat-label\">Ušetřeno</div>\n      </div>\n    </div>\n    \n    <h2>🔍 Sledované produkty</h2>\n    ${preparedData.products.map(p => `\n      <div class=\"product ${p.priorita}\">\n        <strong>${p.nazev}</strong><br>\n        <span class=\"price\">${p.cena_aktualni || p.cena_max || '?'} Kč</span> | \n        ${p.kategorie} | ${p.status}\n      </div>\n    `).join('')}\n    \n    <h2>🏷️ Bazarové nálezy</h2>\n    ${preparedData.bazaarFinds.map(b => `\n      <div class=\"product\">\n        <strong>${b.nazev}</strong><br>\n        <span class=\"price\">${b.cena} Kč</span> | \n        Confidence: ${b.claude_confidence}/10 | ${b.zdroj}\n      </div>\n    `).join('') || '<p>Žádné nové nálezy</p>'}\n  </div>\n</body>\n</html>`;\n}\n\nreturn [{\n  json: {\n    html,\n    source: preparedData.source,\n    userId: preparedData.userId,\n    stats: preparedData.stats\n  }\n}];"
+      },
+      "id": "extract-html",
+      "name": "Extrahuj HTML",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 400]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "rules": [
+            {
+              "value": "discord",
+              "output": 0
+            },
+            {
+              "value": "email",
+              "output": 1
+            }
+          ]
+        },
+        "value": "={{$json.source}}",
+        "fallbackOutput": 0
+      },
+      "id": "switch-output",
+      "name": "Kam poslat?",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 2,
+      "position": [1300, 400]
+    },
+    {
+      "parameters": {
+        "url": "={{$env.DISCORD_WEBHOOK_URL}}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"embeds\": [{\n    \"title\": \"📊 Tvůj Product Tracker Report je připraven!\",\n    \"description\": \"**Statistiky:**\\n🔍 Aktivně hledám: {{$json.stats.aktivni_hledani || 0}}\\n✅ Nalezeno: {{$json.stats.nalezeno || 0}}\\n🛒 Koupeno: {{$json.stats.koupeno || 0}}\\n💰 Ušetřeno: {{$json.stats.usetreno || 0}} Kč\",\n    \"color\": 3447003,\n    \"footer\": {\n      \"text\": \"Kompletní HTML report je k dispozici na web dashboardu\"\n    }\n  }]\n}",
+        "options": {}
+      },
+      "id": "send-to-discord",
+      "name": "Pošli na Discord",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1500, 350]
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{$env.EMAIL_FROM || 'noreply@producttracker.local'}}",
+        "toEmail": "={{$env.EMAIL_TO}}",
+        "subject": "=📊 Product Tracker Report - {{$now.format('DD.MM.YYYY')}}",
+        "emailType": "html",
+        "html": "={{$json.html}}",
+        "options": {}
+      },
+      "id": "send-email",
+      "name": "Pošli email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [1500, 500],
+      "credentials": {
+        "smtp": {
+          "id": "smtp-credentials",
+          "name": "SMTP"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"success\": true,\n  \"message\": \"Report vygenerován\",\n  \"stats\": {{JSON.stringify($json.stats)}}\n}",
+        "options": {}
+      },
+      "id": "respond-webhook",
+      "name": "Odpověz webhooku",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1700, 400]
+    }
+  ],
+  "connections": {
+    "Webhook /generate-report": {
+      "main": [
+        [
+          {
+            "node": "Načti všechny produkty",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Načti bazarové nálezy",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Načti statistiky",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Načti všechny produkty": {
+      "main": [
+        [
+          {
+            "node": "Připrav data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Načti bazarové nálezy": {
+      "main": [
+        [
+          {
+            "node": "Připrav data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Načti statistiky": {
+      "main": [
+        [
+          {
+            "node": "Připrav data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Připrav data": {
+      "main": [
+        [
+          {
+            "node": "Claude: Generuj HTML report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claude: Generuj HTML report": {
+      "main": [
+        [
+          {
+            "node": "Extrahuj HTML",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extrahuj HTML": {
+      "main": [
+        [
+          {
+            "node": "Kam poslat?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Kam poslat?": {
+      "main": [
+        [
+          {
+            "node": "Pošli na Discord",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Pošli email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pošli na Discord": {
+      "main": [
+        [
+          {
+            "node": "Odpověz webhooku",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pošli email": {
+      "main": [
+        [
+          {
+            "node": "Odpověz webhooku",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true
+  },
+  "staticData": null,
+  "tags": [
+    {
+      "name": "product-tracker"
+    }
+  ],
+  "triggerCount": 1,
+  "versionId": "1"
+}

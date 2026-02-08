@@ -1,0 +1,542 @@
+{
+  "name": "C - Discord Command Handler",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "discord-command",
+        "options": {
+          "responseCode": 200,
+          "responseData": "allEntries"
+        }
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook /discord-command",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 300],
+      "webhookId": "discord-command-handler"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parsuj příchozí Discord command\nconst body = $input.first().json.body || $input.first().json;\n\nconst command = body.command || '';\nconst userQuery = body.user_query || body.query || '';\nconst userId = body.user_id || body.userId || 'unknown';\nconst channelId = body.channel_id || '';\n\n// Rozpoznej typ příkazu\nlet commandType = 'unknown';\nlet parsedQuery = userQuery;\n\nif (command === 'search' || userQuery.toLowerCase().startsWith('!search')) {\n  commandType = 'search';\n  parsedQuery = userQuery.replace(/^!search\\s*/i, '');\n} else if (command === 'add' || userQuery.toLowerCase().startsWith('!add')) {\n  commandType = 'add';\n  parsedQuery = userQuery.replace(/^!add\\s*/i, '');\n} else if (command === 'list' || userQuery.toLowerCase().startsWith('!list')) {\n  commandType = 'list';\n} else if (command === 'report' || userQuery.toLowerCase().startsWith('!report')) {\n  commandType = 'report';\n} else if (command === 'settings' || userQuery.toLowerCase().startsWith('!settings')) {\n  commandType = 'settings';\n} else if (command === 'help' || userQuery.toLowerCase().startsWith('!help')) {\n  commandType = 'help';\n}\n\nreturn [{\n  json: {\n    commandType,\n    originalCommand: command,\n    query: parsedQuery,\n    userId,\n    channelId,\n    timestamp: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "parse-command",
+      "name": "Parsuj příkaz",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "rules": [
+            {
+              "value": "search",
+              "output": 0
+            },
+            {
+              "value": "add",
+              "output": 1
+            },
+            {
+              "value": "list",
+              "output": 2
+            },
+            {
+              "value": "report",
+              "output": 3
+            },
+            {
+              "value": "help",
+              "output": 4
+            }
+          ]
+        },
+        "value": "={{$json.commandType}}"
+      },
+      "id": "switch-command",
+      "name": "Rozděl podle příkazu",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 2,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-key",
+              "value": "={{$env.CLAUDE_API_KEY}}"
+            },
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"claude-sonnet-4-20250514\",\n  \"max_tokens\": 1024,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Uživatel hledá produkt: {{$json.query}}\\n\\nExtrahuj z tohoto dotazu strukturované informace pro vyhledávání.\\nVrať POUZE validní JSON:\\n{\\n  \\\"category\\\": \\\"kategorie produktu\\\",\\n  \\\"keywords\\\": [\\\"klíčová\\\", \\\"slova\\\"],\\n  \\\"max_price\\\": číslo nebo null,\\n  \\\"min_price\\\": číslo nebo null,\\n  \\\"brand\\\": \\\"značka nebo null\\\",\\n  \\\"parameters\\\": {\\\"další\\\": \\\"parametry\\\"},\\n  \\\"search_query\\\": \\\"optimalizovaný dotaz pro vyhledávání\\\"\\n}\"\n    }\n  ]\n}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "claude-parse-search",
+      "name": "Claude: Parsuj search dotaz",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [900, 100]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extrahuj search parametry z Claude odpovědi\nconst response = $input.first().json;\nconst content = response.content?.[0]?.text || '';\nconst originalData = $('Parsuj příkaz').first().json;\n\ntry {\n  const jsonMatch = content.match(/\\{[\\s\\S]*\\}/);\n  if (jsonMatch) {\n    const parsed = JSON.parse(jsonMatch[0]);\n    return [{\n      json: {\n        ...originalData,\n        searchParams: parsed,\n        searchQuery: encodeURIComponent(parsed.search_query || originalData.query)\n      }\n    }];\n  }\n} catch (e) {\n  console.error('Parse error:', e.message);\n}\n\n// Fallback\nreturn [{\n  json: {\n    ...originalData,\n    searchParams: { keywords: [originalData.query] },\n    searchQuery: encodeURIComponent(originalData.query)\n  }\n}];"
+      },
+      "id": "extract-search-params",
+      "name": "Extrahuj search parametry",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 100]
+    },
+    {
+      "parameters": {
+        "url": "https://www.heureka.cz/?h[fraze]={{$json.searchQuery}}",
+        "options": {
+          "timeout": 20000
+        },
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            }
+          ]
+        }
+      },
+      "id": "search-heureka",
+      "name": "Prohledej Heureka",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1300, 50],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "url": "https://www.temu.com/search_result.html?search_key={{$json.searchQuery}}",
+        "options": {
+          "timeout": 20000
+        },
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            }
+          ]
+        }
+      },
+      "id": "search-temu",
+      "name": "Prohledej Temu",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1300, 150],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Zpracuj výsledky a vytvoř top 5\nconst heurekaHtml = $('Prohledej Heureka').first().json.body || '';\nconst temuHtml = $('Prohledej Temu').first().json.body || '';\nconst searchParams = $('Extrahuj search parametry').first().json;\nconst results = [];\n\n// Parse Heureka\ntry {\n  const productPattern = /<article[^>]*>([\\s\\S]*?)<\\/article>/gi;\n  let match;\n  while ((match = productPattern.exec(heurekaHtml)) !== null && results.length < 3) {\n    const block = match[1];\n    const titleMatch = block.match(/title=\"([^\"]+)\"/i) || block.match(/<a[^>]*>([^<]{5,100})</i);\n    const priceMatch = block.match(/(\\d[\\d\\s]*[.,]?\\d*)\\s*(Kč|,-)/i);\n    const urlMatch = block.match(/href=\"(https?:\\/\\/[^\"]+)\"/i);\n    const imgMatch = block.match(/src=\"(https?:\\/\\/[^\"]+\\.(?:jpg|jpeg|png|webp)[^\"]*)\"/i);\n    \n    if (titleMatch && priceMatch) {\n      results.push({\n        nazev: titleMatch[1].trim().substring(0, 100),\n        cena: priceMatch[1].replace(/\\s/g, '').replace(',', '.'),\n        url: urlMatch ? urlMatch[1] : '',\n        obrazek: imgMatch ? imgMatch[1] : '',\n        zdroj: 'Heureka'\n      });\n    }\n  }\n} catch (e) {\n  console.error('Heureka parse error:', e.message);\n}\n\n// Parse Temu\ntry {\n  const productPattern = /<div[^>]*data-product[^>]*>([\\s\\S]*?)<\\/div>/gi;\n  let match;\n  while ((match = productPattern.exec(temuHtml)) !== null && results.length < 5) {\n    const block = match[1];\n    const titleMatch = block.match(/title=\"([^\"]+)\"/i);\n    const priceMatch = block.match(/(\\d+[.,]?\\d*)\\s*(Kč|CZK)/i);\n    const urlMatch = block.match(/href=\"([^\"]+)\"/i);\n    \n    if (titleMatch && priceMatch) {\n      results.push({\n        nazev: titleMatch[1].trim().substring(0, 100),\n        cena: priceMatch[1].replace(',', '.'),\n        url: urlMatch ? 'https://www.temu.com' + urlMatch[1] : '',\n        obrazek: '',\n        zdroj: 'Temu'\n      });\n    }\n  }\n} catch (e) {\n  console.error('Temu parse error:', e.message);\n}\n\n// Filtruj podle max ceny\nlet filtered = results;\nif (searchParams.searchParams?.max_price) {\n  filtered = results.filter(r => parseFloat(r.cena) <= searchParams.searchParams.max_price);\n}\n\nreturn [{\n  json: {\n    ...searchParams,\n    results: filtered.slice(0, 5),\n    totalFound: results.length\n  }\n}];"
+      },
+      "id": "process-search-results",
+      "name": "Zpracuj výsledky",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1500, 100]
+    },
+    {
+      "parameters": {
+        "url": "={{$env.DISCORD_WEBHOOK_URL}}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"content\": \"🔍 **Výsledky hledání pro:** {{$json.query}}\",\n  \"embeds\": [\n    {{$json.results.map((r, i) => `{\n      \"title\": \"${i+1}. ${r.nazev.replace(/\"/g, '\\\\\"')}\",\n      \"description\": \"Zdroj: ${r.zdroj}\",\n      \"color\": 3447003,\n      \"fields\": [\n        { \"name\": \"💰 Cena\", \"value\": \"${r.cena} Kč\", \"inline\": true }\n      ],\n      \"url\": \"${r.url}\",\n      \"thumbnail\": { \"url\": \"${r.obrazek || ''}\" }\n    }`).join(',')}}\n  ],\n  \"footer\": {\n    \"text\": \"Nalezeno {{$json.totalFound}} produktů | Pro uložení použij !add\"\n  }\n}",
+        "options": {}
+      },
+      "id": "send-search-results",
+      "name": "Pošli výsledky na Discord",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1700, 100]
+    },
+    {
+      "parameters": {
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-key",
+              "value": "={{$env.CLAUDE_API_KEY}}"
+            },
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"claude-sonnet-4-20250514\",\n  \"max_tokens\": 1024,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Uživatel chce přidat produkt ke sledování: {{$json.query}}\\n\\nExtrahuj strukturované informace.\\nVrať POUZE validní JSON:\\n{\\n  \\\"nazev\\\": \\\"název produktu\\\",\\n  \\\"kategorie\\\": \\\"kategorie\\\",\\n  \\\"cena_max\\\": číslo nebo null,\\n  \\\"cena_min\\\": číslo nebo null,\\n  \\\"priorita\\\": \\\"high/medium/low\\\",\\n  \\\"parametry\\\": {\\\"značka\\\": \\\"...\\\", \\\"další\\\": \\\"...\\\"  }\\n}\"\n    }\n  ]\n}",
+        "options": {}
+      },
+      "id": "claude-parse-add",
+      "name": "Claude: Parsuj add dotaz",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [900, 250]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extrahuj data pro přidání produktu\nconst response = $input.first().json;\nconst content = response.content?.[0]?.text || '';\nconst originalData = $('Parsuj příkaz').first().json;\n\ntry {\n  const jsonMatch = content.match(/\\{[\\s\\S]*\\}/);\n  if (jsonMatch) {\n    const parsed = JSON.parse(jsonMatch[0]);\n    return [{\n      json: {\n        userId: originalData.userId,\n        nazev: parsed.nazev || originalData.query,\n        kategorie: parsed.kategorie || 'ostatní',\n        cena_min: parsed.cena_min || null,\n        cena_max: parsed.cena_max || null,\n        priorita: parsed.priorita || 'medium',\n        parametry: parsed.parametry || {},\n        status: 'hledám',\n        zdroj: 'discord'\n      }\n    }];\n  }\n} catch (e) {\n  console.error('Parse error:', e.message);\n}\n\nreturn [{\n  json: {\n    userId: originalData.userId,\n    nazev: originalData.query,\n    kategorie: 'ostatní',\n    priorita: 'medium',\n    parametry: {},\n    status: 'hledám',\n    zdroj: 'discord'\n  }\n}];"
+      },
+      "id": "extract-add-data",
+      "name": "Extrahuj data produktu",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 250]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO produkty (nazev, kategorie, cena_min, cena_max, priorita, parametry, status, zdroj, user_id)\nVALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9)\nRETURNING id, nazev",
+        "options": {
+          "queryParams": "={{[$json.nazev, $json.kategorie, $json.cena_min, $json.cena_max, $json.priorita, JSON.stringify($json.parametry), $json.status, $json.zdroj, $json.userId]}}"
+        }
+      },
+      "id": "save-product",
+      "name": "Ulož produkt do DB",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1300, 250],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-credentials",
+          "name": "PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "={{$env.DISCORD_WEBHOOK_URL}}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"embeds\": [{\n    \"title\": \"✅ Produkt přidán ke sledování!\",\n    \"description\": \"**{{$json.nazev}}**\",\n    \"color\": 65280,\n    \"fields\": [\n      { \"name\": \"ID\", \"value\": \"#{{$json.id}}\", \"inline\": true },\n      { \"name\": \"Status\", \"value\": \"🔍 Aktivně hledám\", \"inline\": true }\n    ],\n    \"footer\": {\n      \"text\": \"Budu tě informovat o nálezech | !list pro přehled\"\n    }\n  }]\n}",
+        "options": {}
+      },
+      "id": "confirm-add",
+      "name": "Potvrzení na Discord",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1500, 250]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, nazev, kategorie, cena_min, cena_max, priorita, status, datum_pridani\nFROM produkty \nWHERE user_id = $1 AND status IN ('hledám', 'našel')\nORDER BY priorita DESC, datum_pridani DESC\nLIMIT 10",
+        "options": {
+          "queryParams": "={{[$json.userId]}}"
+        }
+      },
+      "id": "list-products",
+      "name": "Načti produkty uživatele",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [900, 400],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-credentials",
+          "name": "PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Formátuj seznam pro Discord\nconst products = $input.all();\nconst originalData = $('Parsuj příkaz').first().json;\n\nif (products.length === 0) {\n  return [{\n    json: {\n      message: 'Zatím nemáš žádné sledované produkty. Použij `!add [produkt]` pro přidání.',\n      isEmpty: true\n    }\n  }];\n}\n\nconst priorityEmoji = {\n  'high': '🔴',\n  'medium': '🟡',\n  'low': '🟢'\n};\n\nconst statusEmoji = {\n  'hledám': '🔍',\n  'našel': '✅',\n  'koupil': '🛒'\n};\n\nconst formattedList = products.map((p, i) => {\n  const prod = p.json;\n  const priceRange = prod.cena_min || prod.cena_max \n    ? `${prod.cena_min || '?'} - ${prod.cena_max || '?'} Kč`\n    : 'bez limitu';\n  return `**${i+1}.** ${priorityEmoji[prod.priorita] || '⚪'} ${prod.nazev}\\n   └ ${statusEmoji[prod.status] || '❓'} ${prod.status} | ${priceRange} | ${prod.kategorie}`;\n}).join('\\n\\n');\n\nreturn [{\n  json: {\n    formattedList,\n    count: products.length,\n    userId: originalData.userId\n  }\n}];"
+      },
+      "id": "format-list",
+      "name": "Formátuj seznam",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 400]
+    },
+    {
+      "parameters": {
+        "url": "={{$env.DISCORD_WEBHOOK_URL}}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"embeds\": [{\n    \"title\": \"📋 Tvoje sledované produkty\",\n    \"description\": \"{{$json.formattedList || $json.message}}\",\n    \"color\": 3447003,\n    \"footer\": {\n      \"text\": \"Celkem: {{$json.count || 0}} produktů | !add pro přidání | !report pro report\"\n    }\n  }]\n}",
+        "options": {}
+      },
+      "id": "send-list",
+      "name": "Pošli seznam na Discord",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1300, 400]
+    },
+    {
+      "parameters": {
+        "url": "={{$env.N8N_WEBHOOK_BASE_URL}}/webhook/generate-report",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"user_id\": \"{{$json.userId}}\",\n  \"source\": \"discord\"\n}",
+        "options": {}
+      },
+      "id": "trigger-report",
+      "name": "Spusť report workflow",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [900, 550]
+    },
+    {
+      "parameters": {
+        "url": "={{$env.DISCORD_WEBHOOK_URL}}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"embeds\": [{\n    \"title\": \"📊 Generuji report...\",\n    \"description\": \"Report bude odeslán během chvíle.\",\n    \"color\": 16776960\n  }]\n}",
+        "options": {}
+      },
+      "id": "confirm-report",
+      "name": "Potvrzení reportu",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1100, 550]
+    },
+    {
+      "parameters": {
+        "url": "={{$env.DISCORD_WEBHOOK_URL}}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"embeds\": [{\n    \"title\": \"❓ Nápověda - Product Tracker Bot\",\n    \"description\": \"Dostupné příkazy:\",\n    \"color\": 3447003,\n    \"fields\": [\n      {\n        \"name\": \"🔍 !search [dotaz]\",\n        \"value\": \"Prohledá e-shopy\\nPříklad: `!search pánev tefal do 1000 Kč`\",\n        \"inline\": false\n      },\n      {\n        \"name\": \"➕ !add [produkt]\",\n        \"value\": \"Přidá produkt ke sledování\\nPříklad: `!add Rychlovarná konvice Philips, max 800 Kč`\",\n        \"inline\": false\n      },\n      {\n        \"name\": \"📋 !list\",\n        \"value\": \"Zobrazí tvoje sledované produkty\",\n        \"inline\": true\n      },\n      {\n        \"name\": \"📊 !report\",\n        \"value\": \"Vygeneruje kompletní report\",\n        \"inline\": true\n      },\n      {\n        \"name\": \"⚙️ !settings\",\n        \"value\": \"Odkaz na web dashboard\",\n        \"inline\": true\n      }\n    ],\n    \"footer\": {\n      \"text\": \"Product Tracker v1.0 | Web: {{$env.WEB_DASHBOARD_URL || 'https://your-dashboard.com'}}\"\n    }\n  }]\n}",
+        "options": {}
+      },
+      "id": "send-help",
+      "name": "Pošli nápovědu",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [900, 700]
+    }
+  ],
+  "connections": {
+    "Webhook /discord-command": {
+      "main": [
+        [
+          {
+            "node": "Parsuj příkaz",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parsuj příkaz": {
+      "main": [
+        [
+          {
+            "node": "Rozděl podle příkazu",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rozděl podle příkazu": {
+      "main": [
+        [
+          {
+            "node": "Claude: Parsuj search dotaz",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Claude: Parsuj add dotaz",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Načti produkty uživatele",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Spusť report workflow",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Pošli nápovědu",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claude: Parsuj search dotaz": {
+      "main": [
+        [
+          {
+            "node": "Extrahuj search parametry",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extrahuj search parametry": {
+      "main": [
+        [
+          {
+            "node": "Prohledej Heureka",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Prohledej Temu",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prohledej Heureka": {
+      "main": [
+        [
+          {
+            "node": "Zpracuj výsledky",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prohledej Temu": {
+      "main": [
+        [
+          {
+            "node": "Zpracuj výsledky",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Zpracuj výsledky": {
+      "main": [
+        [
+          {
+            "node": "Pošli výsledky na Discord",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claude: Parsuj add dotaz": {
+      "main": [
+        [
+          {
+            "node": "Extrahuj data produktu",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extrahuj data produktu": {
+      "main": [
+        [
+          {
+            "node": "Ulož produkt do DB",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ulož produkt do DB": {
+      "main": [
+        [
+          {
+            "node": "Potvrzení na Discord",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Načti produkty uživatele": {
+      "main": [
+        [
+          {
+            "node": "Formátuj seznam",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Formátuj seznam": {
+      "main": [
+        [
+          {
+            "node": "Pošli seznam na Discord",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Spusť report workflow": {
+      "main": [
+        [
+          {
+            "node": "Potvrzení reportu",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true
+  },
+  "staticData": null,
+  "tags": [
+    {
+      "name": "product-tracker"
+    }
+  ],
+  "triggerCount": 1,
+  "versionId": "1"
+}

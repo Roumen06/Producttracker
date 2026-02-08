@@ -1,0 +1,509 @@
+{
+  "name": "B - Sledování bazarů (každou hodinu)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 * * * *"
+            }
+          ]
+        }
+      },
+      "id": "cron-hourly",
+      "name": "Hodinový trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT p.id, p.nazev, p.kategorie, p.cena_min, p.cena_max, p.parametry, up.min_score\nFROM produkty p\nLEFT JOIN user_preferences up ON p.user_id = up.user_id\nWHERE p.status = 'hledám'\nORDER BY p.priorita DESC",
+        "options": {}
+      },
+      "id": "load-criteria",
+      "name": "Načti hledaná kritéria",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [450, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-credentials",
+          "name": "PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://www.sbazar.cz/hledej/{{$json.searchQuery}}",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "fullResponse": true
+            }
+          }
+        },
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            },
+            {
+              "name": "Accept",
+              "value": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            },
+            {
+              "name": "Accept-Language",
+              "value": "cs-CZ,cs;q=0.9"
+            }
+          ]
+        }
+      },
+      "id": "scrape-sbazar",
+      "name": "Scrape Sbazar",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [850, 200],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "url": "https://www.bazos.cz/search.php?hledat={{$json.searchQuery}}&ruession=all",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "fullResponse": true
+            }
+          }
+        },
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            },
+            {
+              "name": "Accept-Language",
+              "value": "cs-CZ,cs;q=0.9"
+            }
+          ]
+        }
+      },
+      "id": "scrape-bazos",
+      "name": "Scrape Bazoš",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [850, 400],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Připrav search queries z kritérií\nconst criteria = $input.all();\nconst queries = [];\n\nfor (const item of criteria) {\n  const product = item.json;\n  queries.push({\n    json: {\n      searchQuery: encodeURIComponent(product.nazev.replace(/[^a-zA-Z0-9\\sáčďéěíňóřšťúůýžÁČĎÉĚÍŇÓŘŠŤÚŮÝŽ]/g, '')),\n      productId: product.id,\n      nazev: product.nazev,\n      kategorie: product.kategorie,\n      cena_min: product.cena_min || 0,\n      cena_max: product.cena_max || 999999,\n      parametry: product.parametry,\n      min_score: product.min_score || 7\n    }\n  });\n}\n\nreturn queries.length > 0 ? queries : [{ json: { searchQuery: '', skip: true } }];"
+      },
+      "id": "prepare-queries",
+      "name": "Připrav search queries",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse Sbazar HTML\nconst html = $input.first().json.body || '';\nconst searchCriteria = $input.first().json;\nconst products = [];\n\ntry {\n  // Sbazar používá specifickou strukturu pro inzeráty\n  const adPattern = /<div[^>]*class=\"[^\"]*c-item[^\"]*\"[^>]*>([\\s\\S]*?)<\\/div>\\s*<\\/div>/gi;\n  const simpleAdPattern = /<article[^>]*>([\\s\\S]*?)<\\/article>/gi;\n  \n  let match;\n  const patterns = [adPattern, simpleAdPattern];\n  \n  for (const pattern of patterns) {\n    pattern.lastIndex = 0;\n    while ((match = pattern.exec(html)) !== null && products.length < 15) {\n      const adBlock = match[1] || match[0];\n      \n      // Extrakce dat\n      const titleMatch = adBlock.match(/class=\"[^\"]*title[^\"]*\"[^>]*>([^<]+)/i) ||\n                         adBlock.match(/<h[23][^>]*>\\s*<a[^>]*>([^<]+)/i) ||\n                         adBlock.match(/title=\"([^\"]+)\"/i) ||\n                         adBlock.match(/<a[^>]*>([^<]{5,100})</i);\n      \n      const priceMatch = adBlock.match(/(\\d[\\d\\s]*[.,]?\\d*)\\s*(Kč|,-)/i);\n      \n      const urlMatch = adBlock.match(/href=\"(https?:\\/\\/[^\"]+sbazar[^\"]+)\"/i) ||\n                       adBlock.match(/href=\"(\\/[^\"]+)\"/i);\n      \n      const imgMatch = adBlock.match(/src=\"(https?:\\/\\/[^\"]+\\.(?:jpg|jpeg|png|webp)[^\"]*)\"/i) ||\n                       adBlock.match(/data-src=\"([^\"]+)\"/i);\n      \n      const descMatch = adBlock.match(/class=\"[^\"]*description[^\"]*\"[^>]*>([^<]+)/i) ||\n                        adBlock.match(/<p[^>]*>([^<]{10,200})/i);\n      \n      if (titleMatch) {\n        const priceStr = priceMatch ? priceMatch[1].replace(/\\s/g, '').replace(',', '.') : '0';\n        const url = urlMatch ? (urlMatch[1].startsWith('http') ? urlMatch[1] : 'https://www.sbazar.cz' + urlMatch[1]) : '';\n        \n        products.push({\n          nazev: titleMatch[1].trim(),\n          cena: parseFloat(priceStr) || 0,\n          url: url,\n          foto_url: imgMatch ? imgMatch[1] : '',\n          popis: descMatch ? descMatch[1].trim() : '',\n          zdroj: 'sbazar',\n          matched_criteria: searchCriteria\n        });\n      }\n    }\n    if (products.length > 0) break;\n  }\n} catch (e) {\n  console.error('Sbazar parsing error:', e.message);\n}\n\nreturn products.map(p => ({ json: p }));"
+      },
+      "id": "parse-sbazar",
+      "name": "Parse Sbazar",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1050, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse Bazoš HTML\nconst html = $input.first().json.body || '';\nconst searchCriteria = $input.first().json;\nconst products = [];\n\ntry {\n  // Bazoš struktura\n  const adPattern = /<div[^>]*class=\"[^\"]*inzeraty[^\"]*\"[^>]*>([\\s\\S]*?)<\\/div>/gi;\n  const tablePattern = /<tr[^>]*>([\\s\\S]*?)<\\/tr>/gi;\n  \n  let match;\n  const patterns = [adPattern, tablePattern];\n  \n  for (const pattern of patterns) {\n    pattern.lastIndex = 0;\n    while ((match = pattern.exec(html)) !== null && products.length < 15) {\n      const adBlock = match[1] || match[0];\n      \n      // Extrakce dat\n      const titleMatch = adBlock.match(/<a[^>]*class=\"[^\"]*nadpis[^\"]*\"[^>]*>([^<]+)/i) ||\n                         adBlock.match(/<h[23][^>]*>([^<]+)/i) ||\n                         adBlock.match(/<a[^>]*>([^<]{5,100})</i);\n      \n      const priceMatch = adBlock.match(/(\\d[\\d\\s]*[.,]?\\d*)\\s*(Kč|,-)/i);\n      \n      const urlMatch = adBlock.match(/href=\"(https?:\\/\\/[^\"]+bazos[^\"]+)\"/i) ||\n                       adBlock.match(/href=\"(\\/[^\"]+)\"/i);\n      \n      const imgMatch = adBlock.match(/src=\"(https?:\\/\\/[^\"]+\\.(?:jpg|jpeg|png|webp)[^\"]*)\"/i);\n      \n      const descMatch = adBlock.match(/class=\"[^\"]*popis[^\"]*\"[^>]*>([^<]+)/i) ||\n                        adBlock.match(/<td[^>]*>([^<]{10,200})/i);\n      \n      if (titleMatch && priceMatch) {\n        const priceStr = priceMatch[1].replace(/\\s/g, '').replace(',', '.');\n        const url = urlMatch ? (urlMatch[1].startsWith('http') ? urlMatch[1] : 'https://www.bazos.cz' + urlMatch[1]) : '';\n        \n        products.push({\n          nazev: titleMatch[1].trim(),\n          cena: parseFloat(priceStr) || 0,\n          url: url,\n          foto_url: imgMatch ? imgMatch[1] : '',\n          popis: descMatch ? descMatch[1].trim() : '',\n          zdroj: 'bazos',\n          matched_criteria: searchCriteria\n        });\n      }\n    }\n    if (products.length > 0) break;\n  }\n} catch (e) {\n  console.error('Bazos parsing error:', e.message);\n}\n\nreturn products.map(p => ({ json: p }));"
+      },
+      "id": "parse-bazos",
+      "name": "Parse Bazoš",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1050, 400]
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "mergeByFields": {
+          "values": []
+        },
+        "options": {}
+      },
+      "id": "merge-bazars",
+      "name": "Sloučit bazary",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2.1,
+      "position": [1250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT url FROM bazarove_nalezy WHERE datum_nalezeni > NOW() - INTERVAL '24 hours'",
+        "options": {}
+      },
+      "id": "load-existing",
+      "name": "Načti existující nálezy",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1450, 200],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-credentials",
+          "name": "PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Odfiltruj již zpracované inzeráty\nconst newItems = $('Sloučit bazary').all();\nconst existingUrls = $('Načti existující nálezy').all().map(item => item.json.url);\n\nconst uniqueItems = newItems.filter(item => {\n  return !existingUrls.includes(item.json.url);\n});\n\nreturn uniqueItems;"
+      },
+      "id": "filter-duplicates",
+      "name": "Odfiltruj duplikáty",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1650, 300]
+    },
+    {
+      "parameters": {
+        "batchSize": 3,
+        "options": {
+          "reset": false
+        }
+      },
+      "id": "batch-for-claude",
+      "name": "Batch pro Claude",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [1850, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Rate limiting mezi Claude requesty\nawait new Promise(resolve => setTimeout(resolve, 3000));\nreturn $input.all();"
+      },
+      "id": "rate-limit",
+      "name": "Rate Limit (3s)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2050, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-key",
+              "value": "={{$env.CLAUDE_API_KEY}}"
+            },
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"claude-sonnet-4-20250514\",\n  \"max_tokens\": 1024,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Analyzuj tuto bazarovou nabídku:\\n\\nNázev: {{$json.nazev}}\\nCena: {{$json.cena}} Kč\\nPopis: {{$json.popis}}\\nZdroj: {{$json.zdroj}}\\nFoto URL: {{$json.foto_url}}\\n\\nMoje hledaná kritéria:\\nHledám: {{$json.matched_criteria.nazev}}\\nKategorie: {{$json.matched_criteria.kategorie}}\\nCenový rozsah: {{$json.matched_criteria.cena_min}} - {{$json.matched_criteria.cena_max}} Kč\\nParametry: {{JSON.stringify($json.matched_criteria.parametry)}}\\n\\nÚkol:\\n1. Zhodnoť, zda nabídka odpovídá mým kritériím\\n2. Vyhodnoť kvalitu nabídky a důvěryhodnost\\n3. Vrať POUZE validní JSON (žádný další text):\\n{\\n  \\\"match\\\": true/false,\\n  \\\"confidence\\\": 1-10,\\n  \\\"matched_item\\\": \\\"název hledané položky nebo null\\\",\\n  \\\"why\\\": \\\"stručné zdůvodnění\\\",\\n  \\\"price_analysis\\\": \\\"podhodnocená/férová/předražená\\\",\\n  \\\"suspicious\\\": true/false\\n}\"\n    }\n  ]\n}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "claude-analyze",
+      "name": "Claude analýza nabídky",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [2250, 300],
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "maxTries": 3
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse Claude response\nconst items = $input.all();\nconst results = [];\n\nfor (const item of items) {\n  try {\n    const response = item.json;\n    const originalData = item.json.originalData || $('Batch pro Claude').first().json;\n    const content = response.content?.[0]?.text || '';\n    \n    // Najdi JSON v odpovědi\n    const jsonMatch = content.match(/\\{[\\s\\S]*\\}/);\n    if (jsonMatch) {\n      const analysis = JSON.parse(jsonMatch[0]);\n      \n      results.push({\n        json: {\n          nazev: originalData.nazev,\n          popis: originalData.popis,\n          cena: originalData.cena,\n          url: originalData.url,\n          foto_url: originalData.foto_url,\n          zdroj: originalData.zdroj,\n          matched_produkt_id: originalData.matched_criteria?.productId || null,\n          claude_match: analysis.match,\n          claude_confidence: analysis.confidence,\n          claude_matched_item: analysis.matched_item,\n          claude_why: analysis.why,\n          claude_price_analysis: analysis.price_analysis,\n          claude_suspicious: analysis.suspicious\n        }\n      });\n    }\n  } catch (e) {\n    console.error('Error parsing Claude response:', e.message);\n  }\n}\n\nreturn results;"
+      },
+      "id": "parse-claude",
+      "name": "Parse Claude odpověď",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2450, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json.claude_match}}",
+              "value2": true
+            },
+            {
+              "value1": "={{$json.claude_suspicious}}",
+              "value2": false
+            }
+          ],
+          "number": [
+            {
+              "value1": "={{$json.claude_confidence}}",
+              "operation": "gte",
+              "value2": 7
+            }
+          ]
+        }
+      },
+      "id": "filter-matches",
+      "name": "Filtruj match && confidence >= 7",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 1,
+      "position": [2650, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO bazarove_nalezy (nazev, popis, cena, url, foto_url, zdroj, matched_produkt_id, claude_confidence, claude_why, status)\nVALUES (\n  $1, $2, $3, $4, $5, $6, $7, $8, $9, 'new'\n)\nON CONFLICT (url) DO NOTHING\nRETURNING id",
+        "options": {
+          "queryParams": "={{[$json.nazev, $json.popis, $json.cena, $json.url, $json.foto_url, $json.zdroj, $json.matched_produkt_id, $json.claude_confidence, $json.claude_why]}}"
+        }
+      },
+      "id": "save-to-db",
+      "name": "Ulož do DB",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [2850, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-credentials",
+          "name": "PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "={{$env.DISCORD_WEBHOOK_URL}}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"embeds\": [{\n    \"title\": \"🔥 Zajímavá nabídka na {{$json.zdroj}}!\",\n    \"description\": \"**{{$json.nazev}}**\",\n    \"color\": {{$json.claude_confidence >= 9 ? 65280 : ($json.claude_confidence >= 7 ? 16776960 : 16711680)}},\n    \"fields\": [\n      {\n        \"name\": \"💰 Cena\",\n        \"value\": \"{{$json.cena}} Kč\",\n        \"inline\": true\n      },\n      {\n        \"name\": \"⭐ Confidence\",\n        \"value\": \"{{$json.claude_confidence}}/10\",\n        \"inline\": true\n      },\n      {\n        \"name\": \"📊 Cenová analýza\",\n        \"value\": \"{{$json.claude_price_analysis}}\",\n        \"inline\": true\n      },\n      {\n        \"name\": \"🎯 Matchuje s\",\n        \"value\": \"{{$json.claude_matched_item || 'Obecná shoda'}}\",\n        \"inline\": false\n      },\n      {\n        \"name\": \"📝 Proč\",\n        \"value\": \"{{$json.claude_why}}\",\n        \"inline\": false\n      },\n      {\n        \"name\": \"📄 Popis\",\n        \"value\": \"{{$json.popis ? $json.popis.substring(0, 200) + '...' : 'Bez popisu'}}\",\n        \"inline\": false\n      }\n    ],\n    \"image\": {\n      \"url\": \"{{$json.foto_url}}\"\n    },\n    \"url\": \"{{$json.url}}\",\n    \"footer\": {\n      \"text\": \"Zdroj: {{$json.zdroj}} | {{$now.format('DD.MM.YYYY HH:mm')}}\"\n    }\n  }]\n}",
+        "options": {}
+      },
+      "id": "discord-notify",
+      "name": "Discord notifikace",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [3050, 300]
+    }
+  ],
+  "connections": {
+    "Hodinový trigger": {
+      "main": [
+        [
+          {
+            "node": "Načti hledaná kritéria",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Načti hledaná kritéria": {
+      "main": [
+        [
+          {
+            "node": "Připrav search queries",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Připrav search queries": {
+      "main": [
+        [
+          {
+            "node": "Scrape Sbazar",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Scrape Bazoš",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Scrape Sbazar": {
+      "main": [
+        [
+          {
+            "node": "Parse Sbazar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Scrape Bazoš": {
+      "main": [
+        [
+          {
+            "node": "Parse Bazoš",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Sbazar": {
+      "main": [
+        [
+          {
+            "node": "Sloučit bazary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Bazoš": {
+      "main": [
+        [
+          {
+            "node": "Sloučit bazary",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Sloučit bazary": {
+      "main": [
+        [
+          {
+            "node": "Načti existující nálezy",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Načti existující nálezy": {
+      "main": [
+        [
+          {
+            "node": "Odfiltruj duplikáty",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Odfiltruj duplikáty": {
+      "main": [
+        [
+          {
+            "node": "Batch pro Claude",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Batch pro Claude": {
+      "main": [
+        [
+          {
+            "node": "Rate Limit (3s)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rate Limit (3s)": {
+      "main": [
+        [
+          {
+            "node": "Claude analýza nabídky",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claude analýza nabídky": {
+      "main": [
+        [
+          {
+            "node": "Parse Claude odpověď",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Claude odpověď": {
+      "main": [
+        [
+          {
+            "node": "Filtruj match && confidence >= 7",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filtruj match && confidence >= 7": {
+      "main": [
+        [
+          {
+            "node": "Ulož do DB",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ulož do DB": {
+      "main": [
+        [
+          {
+            "node": "Discord notifikace",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "staticData": null,
+  "tags": [
+    {
+      "name": "product-tracker",
+      "createdAt": "2024-01-01T00:00:00.000Z",
+      "updatedAt": "2024-01-01T00:00:00.000Z"
+    }
+  ],
+  "triggerCount": 1,
+  "versionId": "1"
+}

@@ -1,0 +1,110 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Produkt {
+  id               Int       @id @default(autoincrement())
+  nazev            String    @db.VarChar(255)
+  kategorie        String?   @db.VarChar(100)
+  cenaAktualni     Decimal?  @map("cena_aktualni") @db.Decimal(10, 2)
+  cenaMin          Decimal?  @map("cena_min") @db.Decimal(10, 2)
+  cenaMax          Decimal?  @map("cena_max") @db.Decimal(10, 2)
+  priorita         String    @default("medium") @db.VarChar(20)
+  status           String    @default("hledám") @db.VarChar(50)
+  zdroj            String?   @db.VarChar(100)
+  url              String?   @unique
+  parametry        Json      @default("{}")
+  claudeScore      Int?      @map("claude_score")
+  claudeReason     String?   @map("claude_reason")
+  datumPridani     DateTime  @default(now()) @map("datum_pridani") @db.Timestamptz
+  datumAktualizace DateTime  @default(now()) @updatedAt @map("datum_aktualizace") @db.Timestamptz
+  userId           String?   @map("user_id") @db.VarChar(100)
+
+  bazaroveNalezy BazarovyNalez[]
+  priceHistory   PriceHistory[]
+  notifications  Notification[]
+
+  @@map("produkty")
+}
+
+model BazarovyNalez {
+  id               Int       @id @default(autoincrement())
+  nazev            String    @db.VarChar(255)
+  popis            String?
+  cena             Decimal?  @db.Decimal(10, 2)
+  url              String?   @unique
+  fotoUrl          String?   @map("foto_url")
+  zdroj            String?   @db.VarChar(50)
+  matchedProduktId Int?      @map("matched_produkt_id")
+  claudeConfidence Int?      @map("claude_confidence")
+  claudeWhy        String?   @map("claude_why")
+  status           String    @default("new") @db.VarChar(20)
+  datumNalezeni    DateTime  @default(now()) @map("datum_nalezeni") @db.Timestamptz
+
+  matchedProdukt Produkt?       @relation(fields: [matchedProduktId], references: [id], onDelete: SetNull)
+  notifications  Notification[]
+
+  @@map("bazarove_nalezy")
+}
+
+model UserPreferences {
+  userId             String   @id @map("user_id") @db.VarChar(100)
+  notifikaceEnabled  Boolean  @default(true) @map("notifikace_enabled")
+  minScore           Int      @default(7) @map("min_score")
+  kategorieZajmu     String[] @map("kategorie_zajmu")
+  maxCena            Decimal? @map("max_cena") @db.Decimal(10, 2)
+  preferovaneZnacky  String[] @map("preferovane_znacky")
+  discordWebhookUrl  String?  @map("discord_webhook_url")
+  email              String?
+  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt          DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@map("user_preferences")
+}
+
+model PriceHistory {
+  id         Int      @id @default(autoincrement())
+  produktId  Int      @map("produkt_id")
+  cena       Decimal  @db.Decimal(10, 2)
+  zdroj      String?  @db.VarChar(100)
+  recordedAt DateTime @default(now()) @map("recorded_at") @db.Timestamptz
+
+  produkt Produkt @relation(fields: [produktId], references: [id], onDelete: Cascade)
+
+  @@map("price_history")
+}
+
+model SearchLog {
+  id           Int      @id @default(autoincrement())
+  searchQuery  String?  @map("search_query")
+  source       String?  @db.VarChar(50)
+  userId       String?  @map("user_id") @db.VarChar(100)
+  resultsCount Int      @default(0) @map("results_count")
+  durationMs   Int?     @map("duration_ms")
+  error        String?
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  @@map("search_logs")
+}
+
+model Notification {
+  id               Int       @id @default(autoincrement())
+  userId           String?   @map("user_id") @db.VarChar(100)
+  type             String?   @db.VarChar(50)
+  title            String?   @db.VarChar(255)
+  body             String?
+  relatedProduktId Int?      @map("related_produkt_id")
+  relatedNalezId   Int?      @map("related_nalez_id")
+  sentAt           DateTime  @default(now()) @map("sent_at") @db.Timestamptz
+  readAt           DateTime? @map("read_at") @db.Timestamptz
+
+  relatedProdukt Produkt?       @relation(fields: [relatedProduktId], references: [id], onDelete: SetNull)
+  relatedNalez   BazarovyNalez? @relation(fields: [relatedNalezId], references: [id], onDelete: SetNull)
+
+  @@map("notifications")
+}
