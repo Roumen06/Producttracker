@@ -45,3 +45,6 @@ n8n_data/
 # Misc
 *.tsbuildinfo
 next-env.d.ts
+
+# Local N8N workflows with credentials (NEVER commit!)
+n8n-workflows-local/
