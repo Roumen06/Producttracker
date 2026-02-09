@@ -9,14 +9,14 @@ export async function GET(request: NextRequest) {
 
     const where: any = {};
     if (status) where.status = status;
-    if (produktId) where.produktId = parseInt(produktId);
+    if (produktId) where.matchedProduktId = parseInt(produktId);
 
     const nalezy = await prisma.bazarovyNalez.findMany({
       where,
       orderBy: { datumNalezeni: "desc" },
       take: 100,
       include: {
-        produkt: true,
+        matchedProdukt: true,
       },
     });
 
@@ -33,14 +33,15 @@ export async function POST(request: NextRequest) {
 
     const nalez = await prisma.bazarovyNalez.create({
       data: {
-        produktId: body.produktId,
+        matchedProduktId: body.produktId || null,
         nazev: body.nazev,
         cena: body.cena ? parseFloat(body.cena) : null,
-        url: body.url,
+        url: body.url || null,
         zdroj: body.zdroj || "manual",
         popis: body.popis || null,
-        lokalita: body.lokalita || null,
-        hodnoceniAi: body.hodnoceniAi || null,
+        fotoUrl: body.fotoUrl || null,
+        claudeConfidence: body.claudeConfidence || null,
+        claudeWhy: body.claudeWhy || null,
         status: body.status || "new",
       },
     });
